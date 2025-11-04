@@ -1,248 +1,283 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useRef, useState } from "react";
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
-  ActivityIndicator,
   Alert,
+  ActivityIndicator,
   Platform,
-} from 'react-native';
-import { SafeAreaProvider } from 'react-native-safe-area-context';
-import { Camera, useCameraDevice } from 'react-native-vision-camera';
-import {
-  widthPercentageToDP as wp,
-  heightPercentageToDP as hp,
-} from 'react-native-responsive-screen';
-import RNFS from 'react-native-fs';
-import CameraRoll from '@react-native-camera-roll/camera-roll';
+  PermissionsAndroid,
+} from "react-native";
+import { Camera, useCameraDevice } from "react-native-vision-camera";
+import RNFS from "react-native-fs";
+import { Video } from "react-native-compressor";
+import CameraRoll from "@react-native-camera-roll/camera-roll";
+import { widthPercentageToDP as wp, heightPercentageToDP as hp } from "react-native-responsive-screen";
 
-const VIDEO_FOLDER = `${RNFS.ExternalStorageDirectoryPath}/Movies/MyCameraAppVideos`;
-
-const ensureVideoFolder = async () => {
-  const exists = await RNFS.exists(VIDEO_FOLDER);
-  if (!exists) {
-    await RNFS.mkdir(VIDEO_FOLDER);
-  }
-};
-
-// Map user-friendly quality to VisionCamera constants
 const qualityMap = {
-  '480p': 'low', // 640x480
-  '720p': 'medium', // 1280x720
-  '1080p': 'high', // 1920x1080
+  "480p": { label: "480p", maxSize: 480 },
+  "720p": { label: "720p", maxSize: 720 },
+  "1080p": { label: "1080p", maxSize: 1080 },
 };
 
-export default function CameraComponent({ location, address }) {
-  const device = useCameraDevice('back');
-  const cameraRef = useRef(null);
+export default function CameraComponent({ address }) {
+  const camera = useRef(null);
+  const device = useCameraDevice("back");
+  const [recording, setRecording] = useState(false);
+  const [compressing, setCompressing] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [selectedQuality, setSelectedQuality] = useState("720p");
+  const [videoCount, setVideoCount] = useState(0);
+  const [dateTime, setDateTime] = useState("");
+  const [elapsedTime, setElapsedTime] = useState(0);
+  const [blink, setBlink] = useState(true);
 
-  const [hasPermission, setHasPermission] = useState(false);
-  const [isRecording, setIsRecording] = useState(false);
-  const [dateTime, setDateTime] = useState('');
-  const [videoQuality, setVideoQuality] = useState('480p'); // default
+  const VIDEO_FOLDER = `${RNFS.CachesDirectoryPath}/videos`;
 
+  // Initial setup: permissions + folder
   useEffect(() => {
-    const requestPermissions = async () => {
-      const cam = await Camera.getCameraPermissionStatus();
-      const mic = await Camera.getMicrophonePermissionStatus();
+    (async () => {
+      await Camera.requestCameraPermission();
+      await Camera.requestMicrophonePermission();
 
-      if (cam !== 'authorized') await Camera.requestCameraPermission();
-      if (mic !== 'authorized') await Camera.requestMicrophonePermission();
+      if (Platform.OS === "android") {
+        if (Platform.Version >= 33) {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_MEDIA_VIDEO);
+        } else {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.WRITE_EXTERNAL_STORAGE);
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.READ_EXTERNAL_STORAGE);
+        }
+      }
 
-      setHasPermission(true);
-    };
-    requestPermissions();
+      if (!(await RNFS.exists(VIDEO_FOLDER))) {
+        await RNFS.mkdir(VIDEO_FOLDER);
+      }
+    })();
   }, []);
 
+  // Timer effect (no auto-stop)
+  useEffect(() => {
+    let interval;
+    if (recording) {
+      setElapsedTime(0);
+      interval = setInterval(() => setElapsedTime((prev) => prev + 1), 1000);
+    } else {
+      setElapsedTime(0);
+    }
+    return () => clearInterval(interval);
+  }, [recording]);
+
+  // Blinking red dot
+  useEffect(() => {
+    let blinkInterval;
+    if (recording) {
+      blinkInterval = setInterval(() => setBlink((prev) => !prev), 500);
+    }
+    return () => clearInterval(blinkInterval);
+  }, [recording]);
+
+  // Date-time overlay
   useEffect(() => {
     let timer;
-    if (isRecording) {
+    if (recording) {
       timer = setInterval(() => {
         const now = new Date();
         setDateTime(now.toLocaleString());
       }, 1000);
     } else {
+      setDateTime("");
       clearInterval(timer);
     }
     return () => clearInterval(timer);
-  }, [isRecording]);
+  }, [recording]);
+
+  const formatTime = (seconds) => {
+    const min = String(Math.floor(seconds / 60)).padStart(2, "0");
+    const sec = String(seconds % 60).padStart(2, "0");
+    return `${min}:${sec}`;
+  };
 
   const startRecording = async () => {
-    if (!cameraRef.current) return;
-    try {
-      setIsRecording(true);
-      await cameraRef.current.startRecording({
-        flash: 'off',
-        fileType: 'mp4',
-        quality: qualityMap[videoQuality], // Correct quality mapping
-        frameRate: 30,
-        videoCodec: 'H264', // Better compression
-        onRecordingFinished: async (video) => {
-          let newPath = '';
-          let fileSizeMB = 'Unknown';
-          try {
-            await ensureVideoFolder();
-            newPath = `${VIDEO_FOLDER}/video_${Date.now()}.mp4`;
-            await RNFS.copyFile(video.path, newPath);
+    if (!camera.current) return;
+    setRecording(true);
 
-            const stats = await RNFS.stat(newPath);
-            fileSizeMB = (stats.size / (1024 * 1024)).toFixed(2);
-
-            await CameraRoll.save(newPath, { type: 'video' });
-
-            Alert.alert(
-              'Video Saved',
-              `Saved to: ${newPath}\nSize: ${fileSizeMB} MB\nQuality: ${videoQuality}`
-            );
-            console.log('Video saved at:', newPath, 'Size:', fileSizeMB, 'MB', 'Quality:', videoQuality);
-          } catch (err) {
-            console.log('Error saving video:', err);
-            Alert.alert(
-              'Video Saved',
-              `Saved to: ${newPath}\nSize: ${fileSizeMB} MB\nQuality: ${videoQuality}`
-            );
-          } finally {
-            setIsRecording(false);
-          }
-        },
-        onRecordingError: (error) => {
-          console.error('Recording error:', error);
-          setIsRecording(false);
-          Alert.alert('Recording Error', error?.message || 'Unknown error');
-        },
-      });
-    } catch (e) {
-      console.log('startRecording error:', e);
-      setIsRecording(false);
-      Alert.alert('Recording Error', e?.message || 'Unknown error');
-    }
+    camera.current.startRecording({
+      onRecordingFinished: (video) => {
+        setRecording(false);
+        handleCompression(video.path);
+        setVideoCount((prev) => prev + 1);
+      },
+      onRecordingError: (err) => {
+        console.error("Recording failed:", err);
+        setRecording(false);
+      },
+    });
   };
 
   const stopRecording = async () => {
-    if (!cameraRef.current) return;
-    await cameraRef.current.stopRecording();
-    setIsRecording(false);
+    if (!camera.current) return;
+    await camera.current.stopRecording();
   };
 
-  if (!device || !hasPermission) {
+  const handleCompression = async (path) => {
+    try {
+      setCompressing(true);
+      setProgress(0);
+      const settings = qualityMap[selectedQuality];
+
+      const compressedPath = await Video.compress(
+        "file://" + path,
+        {
+          compressionMethod: "auto",
+          maxSize: settings.maxSize,
+          fps: 15,
+          removeAudio: false,
+          minimumBitrate: 500000,
+        },
+        (p) => setProgress(Math.floor(p * 100))
+      );
+
+      const compStats = await RNFS.stat(compressedPath);
+      console.log("Compressed size:", (compStats.size / (1024 * 1024)).toFixed(2), "MB");
+
+      if (Platform.OS === "android") {
+        if (Platform.Version >= 33) {
+          // Android 13+
+          try {
+            await CameraRoll.save(compressedPath, { type: "video" });
+          } catch (e) {
+            const destPath = `${RNFS.ExternalStorageDirectoryPath}/DCIM/Camera/vid_${Date.now()}.mp4`;
+            await RNFS.copyFile(compressedPath, destPath);
+            Alert.alert("Success", `Video saved in ${settings.label}`);
+          }
+        } else {
+          // Android 11-12
+          const destPath = `${RNFS.ExternalStorageDirectoryPath}/DCIM/Camera/vid_${Date.now()}.mp4`;
+          await RNFS.copyFile(compressedPath, destPath);
+          Alert.alert("Success", `Video saved to DCIM/Camera`);
+        }
+      } else {
+        // iOS
+        await CameraRoll.save(compressedPath, { type: "video" });
+        Alert.alert("Success", `Video saved in ${settings.label}`);
+      }
+    } catch (err) {
+      console.error("Compression failed:", err);
+      Alert.alert("Error", err?.message || "Video compression failed");
+    } finally {
+      setCompressing(false);
+    }
+  };
+
+  if (!device) {
     return (
-      <SafeAreaProvider>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color="#FF6B6B" />
-          <Text style={styles.loadingText}>Loading Camera...</Text>
-        </View>
-      </SafeAreaProvider>
+      <View style={styles.center}>
+        <Text style={{ color: "#FFF", fontSize: hp("2%") }}>No camera found</Text>
+      </View>
     );
   }
 
   return (
-    <SafeAreaProvider>
-      <View style={styles.container}>
-        <Camera
-          style={StyleSheet.absoluteFill}
-          ref={cameraRef}
-          device={device}
-          isActive={true}
-          video={true}
-          audio={true}
-        />
+    <View style={styles.container}>
+      <Camera ref={camera} style={StyleSheet.absoluteFill} device={device} isActive={true} video={true} audio={true} />
 
-        {isRecording && (
-          <View style={styles.overlay}>
-            <Text style={styles.overlayText}>{dateTime}</Text>
-            {address && (
-              <Text style={styles.overlayText}>
-                Address: {address}
-              </Text>
-            )}
-            {location && (
-              <Text style={styles.overlayText}>
-                Lat: {location.coords.latitude.toFixed(6)}, Lon: {location.coords.longitude.toFixed(6)}
-              </Text>
-            )}
-          </View>
-        )}
-
-        <View style={styles.controls}>
+      {/* Quality Selector */}
+      <View style={styles.qualityContainer}>
+        {Object.keys(qualityMap).map((key) => (
           <TouchableOpacity
-            style={[styles.recordButton, isRecording && styles.recording]}
-            onPress={isRecording ? stopRecording : startRecording}
+            key={key}
+            style={[styles.qualityButton, selectedQuality === key && styles.qualitySelected]}
+            onPress={() => setSelectedQuality(key)}
           >
-            <Text style={styles.recordText}>
-              {isRecording ? 'Stop' : 'Record'}
-            </Text>
+            <Text style={styles.qualityText}>{qualityMap[key].label}</Text>
           </TouchableOpacity>
-
-          <View style={styles.qualityContainer}>
-            {['480p', '720p', '1080p'].map((q) => (
-              <TouchableOpacity
-                key={q}
-                style={[
-                  styles.qualityButton,
-                  videoQuality === q && styles.qualitySelected,
-                ]}
-                onPress={() => setVideoQuality(q)}
-              >
-                <Text style={styles.qualityText}>{q}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        </View>
+        ))}
       </View>
-    </SafeAreaProvider>
+
+      {/* Timer + Red Dot + Date + Address */}
+      {recording && (
+        <View style={styles.overlayInfo}>
+          <View style={styles.timerRow}>
+            {blink && <View style={styles.redDot} />}
+            <Text style={styles.timerText}>{formatTime(elapsedTime)}</Text>
+          </View>
+          <Text style={styles.overlayText}>{dateTime}</Text>
+          {address && <Text style={styles.overlayText}>Address: {address}</Text>}
+        </View>
+      )}
+
+      {/* Record Button */}
+      <View style={styles.controls}>
+        <TouchableOpacity
+          style={[styles.recordButton, recording && styles.recording, compressing && styles.disabledButton]}
+          onPress={recording ? stopRecording : startRecording}
+          disabled={compressing}
+        >
+          <Text style={styles.recordText}>{recording ? "Stop" : "Record"}</Text>
+        </TouchableOpacity>
+      </View>
+
+      {/* Compression Overlay */}
+      {compressing && (
+        <View style={styles.overlay}>
+          <ActivityIndicator size="large" color="#FFF" />
+          <Text style={styles.overlayText1}>
+            Compressing ({selectedQuality}): {progress}%
+          </Text>
+        </View>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: '#000' },
-  loadingContainer: {
-    flex: 1,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#000',
-  },
-  loadingText: { color: '#FFF', marginTop: 10, fontSize: hp('1.7%') },
+  container: { flex: 1, backgroundColor: "#000" },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: "#000" },
   overlay: {
-    position: 'absolute',
-    bottom: hp('22%'),
-    left: wp('3%'),
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    padding: 8,
-    borderRadius: 6,
-    maxWidth: wp('95%'),
+    position: "absolute",
+    top: "50%",
+    left: "50%",
+    transform: [{ translateX: -wp("47.5%") }, { translateY: -hp("5%") }],
+    width: wp("95%"),
+    backgroundColor: "rgba(0,0,0,0.6)",
+    padding: wp("3%"),
+    borderRadius: 10,
+    alignItems: "center",
   },
-  overlayText: { color: '#FFF', fontSize: hp('1.7%'), fontWeight: '600' },
-  controls: {
-    position: 'absolute',
-    bottom: hp('5%'),
-    left: 0,
-    right: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
+  overlayInfo: {
+    position: "absolute",
+    bottom: hp("15%"),
+    left: wp("5%"),
+    right: wp("5%"),
+    backgroundColor: "rgba(0,0,0,0.5)",
+    padding: wp("2%"),
+    borderRadius: 10,
+    alignItems: "center",
   },
-  recordButton: {
-    width: wp('20%'),
-    height: wp('20%'),
-    borderRadius: wp('12.5%'),
-    backgroundColor: '#FF6B6B',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  recording: { backgroundColor: '#D62828' },
-  recordText: { color: '#FFF', fontSize: hp('2.2%'), fontWeight: 'bold' },
+  overlayText: { color: "#FFF", fontSize: hp("1.7%"), fontWeight: "600" },
+  overlayText1: { color: "#FFF", fontSize: hp("1.8%"), fontWeight: "600", marginTop: hp("1%") },
+  controls: { position: "absolute", bottom: hp("5%"), left: 0, right: 0, justifyContent: "center", alignItems: "center" },
+  recordButton: { width: wp("18%"), height: wp("18%"), borderRadius: wp("9%"), backgroundColor: "#FF6B6B", justifyContent: "center", alignItems: "center" },
+  recording: { backgroundColor: "#D62828" },
+  recordText: { color: "#FFF", fontSize: hp("2.2%"), fontWeight: "bold" },
+  disabledButton: { opacity: 0.6 },
   qualityContainer: {
-    flexDirection: 'row',
-    justifyContent: 'space-around',
-    width: wp('60%'),
+    position: "absolute",
+    top: hp("5%"),
+    alignSelf: "center",
+    flexDirection: "row",
+    justifyContent: "space-between",
+    backgroundColor: "rgba(0,0,0,0.4)",
+    padding: wp("2%"),
+    borderRadius: 10,
+    width: wp("70%"),
+    alignItems: "center",
   },
-  qualityButton: {
-    padding: 8,
-    borderRadius: 6,
-    borderWidth: 1,
-    borderColor: '#FFF',
-  },
-  qualitySelected: { backgroundColor: '#FF6B6B' },
-  qualityText: { color: '#FFF', fontWeight: '600' },
+  qualityButton: { paddingVertical: hp("0.5%"), paddingHorizontal: wp("3%"), borderRadius: 6, borderWidth: 1, borderColor: "#FFF" },
+  qualitySelected: { backgroundColor: "#FF6B6B" },
+  qualityText: { color: "#FFF", fontWeight: "600" },
+  timerRow: { flexDirection: "row", alignItems: "center", marginBottom: hp("1%") },
+  redDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: "red", marginRight: wp("2%") },
+  timerText: { color: "#FFF", fontSize: hp("2.2%"), fontWeight: "bold", letterSpacing: 1 },
 });
